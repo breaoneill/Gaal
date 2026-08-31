@@ -80,6 +80,14 @@ are supplied by a root-owned environment file, and audit state lives in
 `/var/lib/gaal`. The timer is persistent, so a host that was unavailable at the
 scheduled time runs the missed job when it next starts.
 
+GitHub Actions runs the test suite, source compilation and dependency check on
+supported Python versions for every push to `main` and every pull request. A
+release remains an explicit operation: on the Linux host, run
+`update-gaal <full-commit-sha>` only after CI passes. The updater accepts commits
+from `origin/main`, repeats the checks on the host, and restores the previous
+revision if deployment fails. Passing the earlier SHA performs a deliberate
+rollback.
+
 Deterministic conflict rules override model ambiguity: routine automated mail
 cannot become yellow merely because the model also marked it uncertain or
 waiting. Concrete action, exceptions, impact and other stronger evidence still

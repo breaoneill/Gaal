@@ -1,0 +1,71 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 1 ]; then
+    echo "usage: update-gaal <full-commit-sha>" >&2
+    exit 2
+fi
+
+target=$1
+case "$target" in
+    *[!0-9a-f]*|'')
+        echo "update-gaal: commit must be a full hexadecimal SHA" >&2
+        exit 2
+        ;;
+esac
+if [ "${#target}" -ne 40 ]; then
+    echo "update-gaal: commit must be a full 40-character SHA" >&2
+    exit 2
+fi
+
+repo=/opt/gaal
+previous=$(git -C "$repo" rev-parse HEAD)
+
+restore_previous() {
+    status=$?
+    trap - EXIT HUP INT TERM
+    echo "update-gaal: restoring $previous after failed deployment" >&2
+    git -C "$repo" switch --detach "$previous"
+    python3 -m venv --clear "$repo/.venv"
+    "$repo/.venv/bin/pip" install --disable-pip-version-check \
+        "$repo[microsoft365]"
+    install -o root -g root -m 0644 \
+        "$repo/deploy/systemd/gaal-daily.service" \
+        /etc/systemd/system/gaal-daily.service
+    install -o root -g root -m 0644 \
+        "$repo/deploy/systemd/gaal-daily.timer" \
+        /etc/systemd/system/gaal-daily.timer
+    systemctl daemon-reload
+    exit "$status"
+}
+trap restore_previous EXIT HUP INT TERM
+
+git -C "$repo" fetch --quiet origin main
+git -C "$repo" rev-parse --verify "$target^{commit}" >/dev/null
+if ! git -C "$repo" merge-base --is-ancestor "$target" origin/main; then
+    echo "update-gaal: commit is not on origin/main" >&2
+    exit 1
+fi
+
+git -C "$repo" switch --detach "$target"
+python3 -m venv --clear "$repo/.venv"
+"$repo/.venv/bin/pip" install --disable-pip-version-check \
+    "$repo[microsoft365]"
+PYTHONPATH="$repo/src" "$repo/.venv/bin/python" \
+    -m unittest discover -s "$repo/tests" -q
+"$repo/.venv/bin/python" -m compileall -q "$repo/src" "$repo/tests"
+"$repo/.venv/bin/python" -m pip check
+
+install -o root -g root -m 0644 \
+    "$repo/deploy/systemd/gaal-daily.service" \
+    /etc/systemd/system/gaal-daily.service
+install -o root -g root -m 0644 \
+    "$repo/deploy/systemd/gaal-daily.timer" \
+    /etc/systemd/system/gaal-daily.timer
+systemd-analyze verify \
+    /etc/systemd/system/gaal-daily.service \
+    /etc/systemd/system/gaal-daily.timer
+systemctl daemon-reload
+
+trap - EXIT HUP INT TERM
+echo "update-gaal: deployed $target (previously $previous)"
