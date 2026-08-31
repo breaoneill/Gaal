@@ -118,6 +118,9 @@ already supported.
 
 ## Configuration and operation
 
+The complete first-install, authentication, dry-run, scheduling, release,
+rollback and rebuild procedure is in [DEPLOYMENT.md](DEPLOYMENT.md).
+
 Start with `config/gaal.example.toml`. The CLI exposes three operations:
 
 ```text
@@ -148,6 +151,8 @@ earlier approved SHA performs a rollback.
 ## Documentation
 
 - [SYSTEM.md](SYSTEM.md) defines Gaal's durable behavioural contract.
+- [DEPLOYMENT.md](DEPLOYMENT.md) is the operator runbook for a private Linux
+  instance.
 - [docs/scope.md](docs/scope.md) records the original Seldon product boundary.
 - [docs/history.md](docs/history.md) records the route from Seldon to Gaal.
 - [docs/reference/seldon/](docs/reference/seldon/) preserves prototype evidence
