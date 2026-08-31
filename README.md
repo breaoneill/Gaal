@@ -1,106 +1,156 @@
 # Gaal
 
-Development repository for **Gaal** and its first application, **Seldon**.
+Gaal is a standalone morning-briefing system for work communications. It reads
+Microsoft 365 email received while its user is away from work, identifies what
+needs attention, and delivers a concise, prioritised briefing before the next
+working day begins.
 
-Gaal is the communications-intelligence engine. Seldon is the personal email
-briefing product that provides Gaal's first concrete use case and reference
-application.
+Gaal is the direct successor to Seldon. Seldon proved the workflow inside
+OpenClaw; Gaal preserves the useful behaviour as an independent Python
+application with explicit configuration, tests, audit state and deployment.
+OpenClaw is not a runtime dependency and Seldon is not a separate application
+inside this repository.
 
-Seldon is a personal productivity assistant created to review overnight and
-weekend work email and produce a concise, prioritised morning briefing.
+## What Gaal does
 
-Its purpose is simple:
+A scheduled run:
 
-- Reduce the time spent understanding a busy inbox.
-- Identify work requiring immediate attention.
-- Separate human communication from automated system traffic.
-- Present a concise summary before the working day begins.
+1. Calculates the unattended window from the user's working pattern.
+2. Reads that window from Microsoft 365 using delegated `Mail.Read` access.
+3. Normalises bounded message data without modifying the mailbox.
+4. Uses a configured reasoning provider to extract facts and concise summaries.
+5. Applies deterministic policy to assign briefing categories.
+6. Records content-free operational state in SQLite.
+7. Prints a dry-run briefing or explicitly delivers it to a private Telegram
+   chat.
 
-The original Seldon prototype operated as a personal tool using a read-only
-mailbox, OpenClaw, and a Telegram control interface. That prototype is the
-source of the requirements recorded here; it is not an implementation in this
-repository.
+Gaal currently runs once each working morning. It is not an inbox replacement,
+continuous monitor, chatbot or autonomous agent.
 
-The repository now contains the first standalone Python slice: static work
-schedules, delegated read-only Microsoft 365 mail ingestion, deterministic
-classification and briefings, SQLite audit state, and a dry-run CLI.
+## Briefing categories
+
+The final category is assigned by Gaal's rules, not by the model:
+
+- red — immediate service impact or a blocking issue;
+- black — material risk accumulating without adequate resolution;
+- orange — a concrete action is required;
+- blue — an issue was previously overlooked or insufficiently escalated;
+- yellow — waiting, uncertain or requiring confirmation;
+- green — informational or routine.
+
+Age alone never makes an item red or black. Deterministic conflict rules also
+prevent routine automated mail from being promoted merely because a model
+expressed uncertainty.
+
+## Trust boundary
+
+Gaal has read-only mailbox access. It does not send, reply to, move or delete
+email. It does not create tickets, contact customers or make commitments.
+
+A reasoning provider may extract facts, evidence and a short briefing sentence,
+but it cannot change trusted sender or message identity, choose the final policy
+category, deliver notifications or mutate an external system. A model may
+recommend that a ticket should exist; that recommendation is not permission to
+create one.
+
+Telegram is the only implemented delivery destination. Delivery requires the
+explicit `--deliver-telegram` flag, and a scheduled window cannot be delivered
+twice. Oversized briefings fail before sending rather than risk a partial or
+duplicated result.
+
+## Privacy and state
+
+Mailbox content is processed for the current run and is not stored in SQLite.
+The audit database retains operational facts, hashed conversation and
+destination identifiers, observation counts, classifications and delivery
+status. Briefings expose short opaque `[olk:…]` references rather than raw
+provider identifiers.
+
+Configuration, token caches, API keys, model files and SQLite state are local
+to the machine running Gaal and must not be committed. OpenAI requests set
+`store` to false.
 
 ## Reasoning providers
 
-Model reasoning extracts a strict set of facts and evidence from bounded mail
-summaries. Deterministic Gaal policy still assigns the final briefing colour.
+Gaal has one provider boundary with three configurations:
 
-- `ollama` is the local-first default in the example configuration. Its endpoint
-  is restricted to the local machine.
-- `openai` is an explicit metered option and reads its key from
-  `OPENAI_API_KEY` (or another configured environment variable). Requests set
-  `store` to false.
-- `disabled` retains the deterministic rules-only path.
+- `openai` — the proven production path; explicit, metered and configured by
+  environment variable;
+- `ollama` — an optional workstation path for suitable local hardware;
+- `disabled` — a model-free rules-only fallback.
 
-No provider may deliver notifications or mutate the mailbox. Configuration,
-token caches, API keys, model files, and SQLite state are machine-local and are
-not committed, which keeps the checkout portable to Gaalframe.
+OpenAI has been exercised end to end with a real mailbox. Rules-only operation
+also completes end to end but currently lacks enough semantic extraction to
+produce a useful briefing on its own. Ollama is not intended for the small
+production host and remains experimental; invalid structured output is rejected
+without delivery.
 
-The deterministic briefing categories are red (immediate impact or blocking),
-black (accumulating material risk), orange (action required), blue (overlooked
-or previously unescalated), yellow (waiting or uncertain), and green
-(informational or routine). Age alone never turns an item red or black.
+## Current implementation
 
-Reasoning providers also produce a short factual briefing sentence. Gaal keeps
-the bounded source preview and evidence separately; the model cannot alter the
-trusted sender or message identity.
+Implemented:
 
-Rendered briefings expose only stable short `[olk:…]` references derived from
-provider IDs. Raw mailbox message identifiers remain internal.
+- static working days, hours and timezone;
+- delegated Microsoft 365 device-code authentication;
+- bounded, read-only Inbox ingestion;
+- deterministic six-category classification;
+- provider-assisted fact extraction and summarisation;
+- concise daily and reference briefings;
+- SQLite audit, thread continuity and delivery idempotency;
+- explicit Telegram delivery;
+- ticket-recommendation plumbing without ticket creation;
+- CLI dry runs and run inspection;
+- Linux systemd scheduling;
+- CI on Python 3.11 and 3.13;
+- explicit, tested and rollback-capable server releases.
 
-SQLite tracks hashed conversation keys, first/last observation, counts and the
-last deterministic classification without storing mail content. A later action
-request in a previously green/yellow thread becomes blue. Delivered scheduled
-windows are idempotent; dry runs remain repeatable.
+Not implemented:
 
-Reasoning may set `ticket_recommended` with a short in-memory reason. The
-briefing shows a ticket marker and SQLite retains only the boolean. No ticket
-destination is called, and a recommendation never authorises creation.
+- a web interface;
+- multi-user or hosted operation;
+- Teams or calendar ingestion;
+- email or ticket creation;
+- continuous monitoring;
+- automatic production deployment.
 
-Telegram delivery is an explicit outbound action. The CLI remains stdout
-dry-run by default; only `--deliver-telegram` selects the configured private
-chat and permits a send. Tokens come from an environment variable or macOS
-Keychain, chat identity is hashed in audit state, and duplicate delivery of a
-scheduled window is blocked. Briefings over Telegram's single-message limit
-fail before sending rather than risk partial duplicate delivery.
-The private chat ID may also be loaded from Keychain and need not appear in
-configuration.
+Source and destination interfaces exist to keep these boundaries clean. They
+are not a plugin system and do not imply that speculative integrations are
+already supported.
 
-## Linux scheduling
+## Configuration and operation
 
-The `deploy/systemd` directory contains the minimal service and timer used by
-a standalone Linux host. It runs as a dedicated `gaal` account at 07:30
+Start with `config/gaal.example.toml`. The CLI exposes three operations:
+
+```text
+gaal auth-microsoft365
+gaal daily
+gaal last-run
+```
+
+`gaal daily` is a dry run unless `--deliver-telegram` is supplied. See the
+command help for required paths and timestamps.
+
+The files in `deploy/systemd` run Gaal under a dedicated Linux account at 07:30
 Europe/London, Monday to Thursday. Configuration lives in `/etc/gaal`, secrets
-are supplied by a root-owned environment file, and audit state lives in
-`/var/lib/gaal`. The timer is persistent, so a host that was unavailable at the
-scheduled time runs the missed job when it next starts.
+are supplied by a restricted environment file, and audit state lives in
+`/var/lib/gaal`.
 
-GitHub Actions runs the test suite, source compilation and dependency check on
-supported Python versions for every push to `main` and every pull request. A
-release remains an explicit operation: on the Linux host, run
-`update-gaal <full-commit-sha>` only after CI passes. The updater accepts commits
-from `origin/main`, repeats the checks on the host, and restores the previous
-revision if deployment fails. Passing the earlier SHA performs a deliberate
-rollback.
+GitHub Actions runs tests, compilation and dependency checks on every push to
+`main` and every pull request. Production deployment remains deliberate:
 
-Deterministic conflict rules override model ambiguity: routine automated mail
-cannot become yellow merely because the model also marked it uncertain or
-waiting. Concrete action, exceptions, impact and other stronger evidence still
-take precedence.
+```text
+update-gaal <full-commit-sha>
+```
 
-## Documentation model
+The updater accepts a commit from `origin/main`, repeats verification on the
+host and restores the previous revision if deployment fails. Supplying an
+earlier approved SHA performs a rollback.
 
-- [SYSTEM.md](SYSTEM.md) defines the product vision and enduring principles.
-- [docs/scope.md](docs/scope.md) defines the Seldon product boundary.
-- [docs/history.md](docs/history.md) records project history.
-- [docs/reference/seldon/](docs/reference/seldon/) records observed prototype
-  behaviour and migration evidence.
-- [docs/architecture.md](docs/architecture.md) describes Gaal's target
-  architecture, not current repository functionality.
-- [docs/reference/seldon/migration-notes.md](docs/reference/seldon/migration-notes.md)
-  is the current implementation-requirements inventory.
+## Documentation
+
+- [SYSTEM.md](SYSTEM.md) defines Gaal's durable behavioural contract.
+- [docs/scope.md](docs/scope.md) records the original Seldon product boundary.
+- [docs/history.md](docs/history.md) records the route from Seldon to Gaal.
+- [docs/reference/seldon/](docs/reference/seldon/) preserves prototype evidence
+  and migration notes.
+- [docs/architecture.md](docs/architecture.md) describes longer-term extension
+  seams and should not be read as a list of implemented features.
