@@ -1,0 +1,30 @@
+[work]
+timezone = "Europe/London"
+days = ["mon", "tue", "wed", "thu"]
+start = "07:30"
+finish = "15:15"
+
+[microsoft365]
+client_id = "replace-with-application-client-id"
+tenant_id = "replace-with-directory-tenant-id"
+token_cache = "~/.local/state/gaal/msal-cache.json"
+
+[reasoning]
+# Local-first. Use "openai" only as an explicit, metered choice; "disabled" is also valid.
+provider = "ollama"
+model = "qwen3:4b"
+endpoint = "http://127.0.0.1:11434"
+# For provider = "openai", set model and export this variable; never put the key here.
+api_key_env = "OPENAI_API_KEY"
+# On macOS only, Gaal may fall back to this generic Keychain service.
+# keychain_service = "gaal-openai-api-key"
+# keychain_account = "your-macos-username"
+
+[telegram]
+token_env = "TELEGRAM_BOT_TOKEN"
+chat_id_env = "TELEGRAM_CHAT_ID"
+# On macOS only:
+# keychain_service = "gaal-telegram-bot-token"
+# keychain_account = "your-macos-username"
+# chat_id_keychain_service = "gaal-telegram-chat-id"
+# chat_id_keychain_account = "your-macos-username"
