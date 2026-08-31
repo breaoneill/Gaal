@@ -62,9 +62,11 @@ install -o root -g root -m 0644 \
 install -o root -g root -m 0644 \
     "$repo/deploy/systemd/gaal-daily.timer" \
     /etc/systemd/system/gaal-daily.timer
-install -o root -g root -m 0755 \
-    "$repo/deploy/systemd/update-gaal" \
-    /usr/local/sbin/update-gaal
+if [ -f "$repo/deploy/systemd/update-gaal" ]; then
+    install -o root -g root -m 0755 \
+        "$repo/deploy/systemd/update-gaal" \
+        /usr/local/sbin/update-gaal
+fi
 systemd-analyze verify \
     /etc/systemd/system/gaal-daily.service \
     /etc/systemd/system/gaal-daily.timer
