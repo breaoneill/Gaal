@@ -1,0 +1,17 @@
+[Unit]
+Description=Generate and deliver the daily Gaal briefing
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=gaal
+Group=gaal
+WorkingDirectory=/var/lib/gaal
+EnvironmentFile=/etc/gaal/gaal.env
+ExecStart=/opt/gaal/deploy/systemd/run-daily
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/gaal

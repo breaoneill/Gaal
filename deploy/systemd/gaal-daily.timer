@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Gaal at 07:30 on working days
+
+[Timer]
+OnCalendar=Mon..Thu *-*-* 07:30:00 Europe/London
+Persistent=true
+AccuracySec=1min
+Unit=gaal-daily.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+run_date=$(TZ=Europe/London date +%F)
+run_at=$(TZ=Europe/London date --iso-8601=seconds)
+
+exec /opt/gaal/.venv/bin/gaal daily \
+    --config /etc/gaal/gaal.toml \
+    --microsoft365 \
+    --date "$run_date" \
+    --run-at "$run_at" \
+    --state /var/lib/gaal/gaal.db \
+    --deliver-telegram

@@ -71,6 +71,15 @@ fail before sending rather than risk partial duplicate delivery.
 The private chat ID may also be loaded from Keychain and need not appear in
 configuration.
 
+## Linux scheduling
+
+The `deploy/systemd` directory contains the minimal service and timer used by
+a standalone Linux host. It runs as a dedicated `gaal` account at 07:30
+Europe/London, Monday to Thursday. Configuration lives in `/etc/gaal`, secrets
+are supplied by a root-owned environment file, and audit state lives in
+`/var/lib/gaal`. The timer is persistent, so a host that was unavailable at the
+scheduled time runs the missed job when it next starts.
+
 Deterministic conflict rules override model ambiguity: routine automated mail
 cannot become yellow merely because the model also marked it uncertain or
 waiting. Concrete action, exceptions, impact and other stronger evidence still
