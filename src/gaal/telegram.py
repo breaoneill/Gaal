@@ -14,6 +14,23 @@ class TelegramError(RuntimeError):
     pass
 
 
+def _chunks(body: str, limit: int = 4096) -> list[str]:
+    if not body:
+        raise TelegramError("Telegram briefing must not be empty")
+    chunks: list[str] = []
+    current = ""
+    for line in body.splitlines(keepends=True):
+        if len(line) > limit:
+            raise TelegramError("Telegram briefing contains an oversized line")
+        if current and len(current) + len(line) > limit:
+            chunks.append(current)
+            current = ""
+        current += line
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def _post(url: str, payload: dict[str, Any]) -> dict[str, Any]:
     request = Request(url, data=json.dumps(payload).encode("utf-8"),
                       headers={"Content-Type": "application/json"}, method="POST")
@@ -41,10 +58,9 @@ class TelegramBotDestination:
     def deliver(self, notification: Notification, *, dry_run: bool) -> None:
         if dry_run:
             return
-        if not 1 <= len(notification.body) <= 4096:
-            raise TelegramError("Telegram briefing must fit in one message")
-        self._request(f"https://api.telegram.org/bot{self._token}/sendMessage", {
-            "chat_id": self._chat_id,
-            "text": notification.body,
-            "link_preview_options": {"is_disabled": True},
-        })
+        for chunk in _chunks(notification.body):
+            self._request(f"https://api.telegram.org/bot{self._token}/sendMessage", {
+                "chat_id": self._chat_id,
+                "text": chunk,
+                "link_preview_options": {"is_disabled": True},
+            })

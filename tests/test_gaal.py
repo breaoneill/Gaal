@@ -94,14 +94,37 @@ class GaalTests(unittest.TestCase):
             calls.append((url, payload, headers))
             result = {**self.reasoning_payload()["items"][0], "id": "item-0"}
             return {"output": [{"content": [{"type": "output_text",
-                    "text": json.dumps({"items": [result]})}]}]}
+                    "text": json.dumps({"items": [result]})}]}],
+                    "usage": {"input_tokens": 1000, "output_tokens": 200}}
         result = OpenAIReasoningProvider(model="test", api_key="secret", request=request).interpret([item(id="trusted")])
         self.assertTrue(result[0].action_required)
         self.assertEqual(result[0].id, "trusted")
         self.assertIn('"id": "item-0"', calls[0][1]["input"])
         self.assertNotIn("trusted", calls[0][1]["input"])
         self.assertFalse(calls[0][1]["store"])
+        self.assertEqual(calls[0][1]["reasoning"], {"effort": "none"})
+        self.assertEqual(calls[0][1]["max_output_tokens"], 5000)
         self.assertEqual(calls[0][2]["Authorization"], "Bearer secret")
+
+    def test_openai_reasoning_batches_and_stops_before_cost_limit(self):
+        calls = []
+        def request(url, payload, headers):
+            calls.append(payload)
+            supplied = json.loads(payload["input"])
+            template = self.reasoning_payload()["items"][0]
+            results = [{**template, "id": value["id"]} for value in supplied]
+            return {"output": [{"content": [{"type": "output_text",
+                    "text": json.dumps({"items": results})}]}],
+                    "usage": {"input_tokens": 1000, "output_tokens": 500}}
+        values = [item(id=str(index)) for index in range(21)]
+        provider = OpenAIReasoningProvider(model="test", api_key="secret", request=request)
+        self.assertEqual(len(provider.interpret(values)), 21)
+        self.assertEqual([len(json.loads(call["input"])) for call in calls], [20, 1])
+        blocked = OpenAIReasoningProvider(model="test", api_key="secret", request=request,
+                                          max_cost_usd=0.03)
+        with self.assertRaisesRegex(ReasoningError, "cost limit"):
+            blocked.interpret([item()])
+        self.assertEqual(len(calls), 2)
 
     def test_openai_provider_can_read_macos_keychain(self):
         settings = ReasoningSettings(provider="openai", model="test",
@@ -276,7 +299,10 @@ class GaalTests(unittest.TestCase):
         destination.deliver(notification, dry_run=False)
         self.assertEqual(calls[0][1]["chat_id"], "private-chat")
         self.assertNotIn("private-chat", destination.name)
-        with self.assertRaisesRegex(TelegramError, "one message"):
+        destination.deliver(__import__("gaal.models", fromlist=["Notification"]).Notification(
+            subject="long", body=("x" * 2000 + "\n") * 3), dry_run=False)
+        self.assertEqual([len(call[1]["text"]) for call in calls[1:]], [4002, 2001])
+        with self.assertRaisesRegex(TelegramError, "oversized line"):
             destination.deliver(__import__("gaal.models", fromlist=["Notification"]).Notification(
                 subject="long", body="x" * 4097), dry_run=False)
 

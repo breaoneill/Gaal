@@ -170,29 +170,57 @@ class OllamaReasoningProvider:
 
 class OpenAIReasoningProvider:
     def __init__(self, *, model: str, api_key: str,
-                 request: Callable[[str, dict[str, Any], dict[str, str]], dict[str, Any]] = _post_json):
+                 request: Callable[[str, dict[str, Any], dict[str, str]], dict[str, Any]] = _post_json,
+                 batch_size: int = 20, max_cost_usd: float = 2.0):
         if not api_key:
             raise ValueError("OpenAI API key is empty")
+        if batch_size < 1 or max_cost_usd <= 0:
+            raise ValueError("OpenAI batch size and cost limit must be positive")
         self.model, self.api_key, self.request = model, api_key, request
+        self.batch_size, self.max_cost_usd = batch_size, max_cost_usd
 
     def interpret(self, items: Sequence[Item]) -> list[Item]:
         if not items:
             return []
-        aliases = [replace(item, id=f"item-{index}") for index, item in enumerate(items)]
-        response = self.request("https://api.openai.com/v1/responses", {
-            "model": self.model, "store": False,
-            "instructions": SYSTEM, "input": _input(aliases),
-            "text": {"format": {"type": "json_schema", "name": "gaal_interpretation",
-                                "strict": True, "schema": INTERPRETATION_SCHEMA}},
-        }, {"Authorization": f"Bearer {self.api_key}"})
-        try:
-            texts = [content["text"] for output in response["output"]
-                     for content in output.get("content", []) if content.get("type") == "output_text"]
-            payload = json.loads("".join(texts))
-        except (KeyError, TypeError, json.JSONDecodeError) as exc:
-            raise ReasoningError("OpenAI returned an invalid structured response") from exc
-        interpreted = _apply(aliases, payload)
-        return [replace(value, id=original.id) for value, original in zip(interpreted, items)]
+        interpreted: list[Item] = []
+        spent = 0.0
+        max_output_tokens = 5000
+        reserve_per_batch = 20_000 * 0.75 / 1_000_000 \
+            + max_output_tokens * 4.50 / 1_000_000
+        for offset in range(0, len(items), self.batch_size):
+            if spent + reserve_per_batch > self.max_cost_usd:
+                raise ReasoningError("OpenAI reasoning stopped at the configured cost limit")
+            originals = items[offset:offset + self.batch_size]
+            aliases = [replace(item, id=f"item-{index}")
+                       for index, item in enumerate(originals)]
+            response = self.request("https://api.openai.com/v1/responses", {
+                "model": self.model, "store": False,
+                "reasoning": {"effort": "none"},
+                "max_output_tokens": max_output_tokens,
+                "instructions": SYSTEM, "input": _input(aliases),
+                "text": {"format": {"type": "json_schema", "name": "gaal_interpretation",
+                                    "strict": True, "schema": INTERPRETATION_SCHEMA}},
+            }, {"Authorization": f"Bearer {self.api_key}"})
+            try:
+                usage = response["usage"]
+                input_tokens, output_tokens = usage["input_tokens"], usage["output_tokens"]
+                if not isinstance(input_tokens, int) or not isinstance(output_tokens, int):
+                    raise TypeError
+                spent += input_tokens * 0.75 / 1_000_000 + output_tokens * 4.50 / 1_000_000
+                if spent > self.max_cost_usd:
+                    raise ReasoningError("OpenAI reasoning exceeded the configured cost limit")
+                texts = [content["text"] for output in response["output"]
+                         for content in output.get("content", [])
+                         if content.get("type") == "output_text"]
+                payload = json.loads("".join(texts))
+            except ReasoningError:
+                raise
+            except (KeyError, TypeError, json.JSONDecodeError) as exc:
+                raise ReasoningError("OpenAI returned an invalid structured response or usage") from exc
+            values = _apply(aliases, payload)
+            interpreted.extend(replace(value, id=original.id)
+                               for value, original in zip(values, originals))
+        return interpreted
 
 
 def make_reasoning_provider(settings: ReasoningSettings):
