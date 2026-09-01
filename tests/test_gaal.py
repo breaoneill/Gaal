@@ -190,6 +190,33 @@ class GaalTests(unittest.TestCase):
         self.assertEqual((actionable.flag, actionable.reason), ("orange", "action_required"))
         self.assertEqual((exceptional.flag, exceptional.reason), ("yellow", "uncertain"))
 
+    def test_routine_operational_cruft_is_deterministically_green(self):
+        routine = [
+            item(source="GitHub", summary="A developer pushed commits", action_required=True,
+                 ticket_recommended=True, ticket_reason="Track it"),
+            item(source="Logwatch", summary="Daily system report", uncertain=True),
+            item(source="Backup monitor", summary="Backup completed successfully",
+                 action_required=True, exception=True),
+        ]
+        results = [classify(value, as_of=NOW) for value in routine]
+        self.assertEqual([value.flag for value in results], ["green", "green", "green"])
+        self.assertTrue(all(not value.ticket_recommended for value in results))
+        failure = classify(item(source="GitHub", summary="Security alert: vulnerability found",
+                                automated=True, exception=True), as_of=NOW)
+        self.assertEqual(failure.flag, "yellow")
+
+    def test_ticket_recommendation_requires_durable_actionable_work(self):
+        ordinary = classify(item(action_required=True, ticket_recommended=True,
+                                 ticket_reason="Model suggested it"), as_of=NOW)
+        durable = classify(item(action_required=True, blocked=True, ticket_recommended=True,
+                                ticket_reason="Blocked work needs ownership"), as_of=NOW)
+        informational = classify(item(service_impact=True, ticket_recommended=True,
+                                      ticket_reason="No action requested"), as_of=NOW)
+        self.assertFalse(ordinary.ticket_recommended)
+        self.assertIsNone(ordinary.ticket_reason)
+        self.assertTrue(durable.ticket_recommended)
+        self.assertFalse(informational.ticket_recommended)
+
     def test_strict_normalized_schema(self):
         with self.assertRaisesRegex(ValueError, "boolean"):
             item(action_required="yes")
@@ -201,18 +228,23 @@ class GaalTests(unittest.TestCase):
     def test_daily_sort_and_empty_contract(self):
         green = classify(item(id="z"), as_of=NOW)
         red = classify(item(id="a", service_impact=True), as_of=NOW)
-        self.assertLess(daily([green, red]).body.index(reference(red)),
-                        daily([green, red]).body.index(reference(green)))
+        orange = classify(item(id="o", action_required=True), as_of=NOW)
+        self.assertLess(daily([orange, red]).body.index(reference(red)),
+                        daily([orange, red]).body.index(reference(orange)))
         self.assertEqual(daily([]).body, "# Gaal daily briefing\n\nNo material activity.\n")
         self.assertEqual(daily([]).subject, "Gaal daily briefing")
-        concise = classify(item(briefing_summary="Concise operational summary."), as_of=NOW)
+        self.assertEqual(daily([green]).body, "# Gaal daily briefing\n\nNo material activity.\n")
+        concise = classify(item(briefing_summary="Concise operational summary.",
+                                action_required=True), as_of=NOW)
         self.assertIn("Concise operational summary.", daily([concise]).body)
         self.assertNotIn("Needs attention", daily([concise]).body)
-        ticketed = classify(item(ticket_recommended=True, ticket_reason="Track this work."), as_of=NOW)
+        ticketed = classify(item(action_required=True, blocked=True, ticket_recommended=True,
+                                 ticket_reason="Track this work."), as_of=NOW)
         self.assertIn("🎫", daily([ticketed]).body)
 
     def test_briefing_uses_stable_opaque_references(self):
-        value = classify(item(id="<private-provider-id@example.com>"), as_of=NOW)
+        value = classify(item(id="<private-provider-id@example.com>",
+                              action_required=True), as_of=NOW)
         first = daily([value]).body
         second = daily([value]).body
         self.assertEqual(first, second)
