@@ -48,6 +48,8 @@ Set service_impact=true when a service is down, unavailable, degraded, or users 
 Set action_required=true when the sender asks someone to investigate, respond, fix, approve, or
 otherwise do work. Set exception=true for an automated report describing a failure or abnormal
 condition; routine successful automation is automated=true and exception=false.
+Set deadline only when the summary contains an unambiguous ISO 8601 timestamp with a UTC offset.
+For relative or ambiguous phrases such as "COB Tuesday", set deadline=null and uncertain=true.
 Set accumulating_issue=true only when an ongoing or repeated condition is building material risk
 over time, such as recurring backup failures or a worsening unresolved pattern. Set overlooked=true
 only when the message itself shows that an older issue was missed, repeatedly chased, or left
@@ -101,7 +103,11 @@ def _apply(items: Sequence[Item], payload: Any) -> list[Item]:
             raise ReasoningError("reasoning result contains a ticket reason without a recommendation")
         deadline = value["deadline"]
         if deadline is not None:
-            deadline = aware_datetime(deadline, "deadline")
+            try:
+                deadline = aware_datetime(deadline, "deadline")
+            except ValueError:
+                deadline = None
+                data["uncertain"] = True
         if value["status"] not in {"open", "resolved", "waiting"}:
             raise ReasoningError("reasoning result contains an invalid status")
         results.append(replace(originals[item_id], status=value["status"], deadline=deadline,

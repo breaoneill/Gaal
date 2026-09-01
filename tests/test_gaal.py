@@ -144,6 +144,17 @@ class GaalTests(unittest.TestCase):
         with self.assertRaisesRegex(ReasoningError, "omitted"):
             provider.interpret([item()])
 
+    def test_reasoning_degrades_ambiguous_deadline_safely(self):
+        payload = self.reasoning_payload()
+        payload["items"][0]["deadline"] = "COB Tuesday"
+        payload["items"][0]["uncertain"] = False
+        provider = OllamaReasoningProvider(model="test", request=lambda *args: {
+            "message": {"content": json.dumps(payload)}})
+        result = provider.interpret([item()])[0]
+        self.assertIsNone(result.deadline)
+        self.assertTrue(result.uncertain)
+        self.assertTrue(result.action_required)
+
     def test_reasoning_prompt_defines_obvious_operational_facts(self):
         from gaal.reasoning import SYSTEM
         self.assertIn("service is down", SYSTEM)
@@ -151,6 +162,7 @@ class GaalTests(unittest.TestCase):
         self.assertIn("building material risk", SYSTEM)
         self.assertIn("mere age is not enough", SYSTEM)
         self.assertIn("one concise factual sentence", SYSTEM)
+        self.assertIn("COB Tuesday", SYSTEM)
         self.assertIn("never authorises ticket creation", SYSTEM)
 
     def test_classification_contract(self):
