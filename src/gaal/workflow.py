@@ -28,6 +28,8 @@ def run_daily(*, scheduled_date: date, actual_run_time: datetime,
     window = schedule.daily_window(scheduled_date)
     destination_name = getattr(destination, "name", type(destination).__name__)
     stage, status, failure, notification = "source_reading", "failed", None, None
+    counts = {"fetched": 0, "interpreted": 0, "classified": 0,
+              "rendered": 0, "delivered": 0}
     try:
         if not dry_run and store.was_delivered(
                 workflow_name="daily_briefing", scheduled_time=window.end.isoformat(),
@@ -35,9 +37,11 @@ def run_daily(*, scheduled_date: date, actual_run_time: datetime,
             stage = "idempotency"
             raise DuplicateDelivery("briefing was already delivered for this scheduled window")
         items = source.read(window.start, window.end)
+        counts["fetched"] = len(items)
         if reasoning is not None:
             stage = "reasoning"
             items = reasoning.interpret(items)
+        counts["interpreted"] = len(items)
         stage = "history"
         items = [replace(item, overlooked=True)
                  if item.action_required
@@ -46,11 +50,14 @@ def run_daily(*, scheduled_date: date, actual_run_time: datetime,
                  else item for item in items]
         stage = "classification"
         classified = [classify(item, as_of=actual_run_time) for item in items]
+        counts["classified"] = len(classified)
         store.record_items(classified, observed_at=actual_run_time.isoformat())
         stage = "rendering"
         notification = daily(classified)
+        counts["rendered"] = len(classified)
         stage = "destination_dispatch"
         destination.deliver(notification, dry_run=dry_run)
+        counts["delivered"] = len(classified)
         status = "dry_run" if dry_run else "delivered"
     except Exception as exc:
         failure = exc
@@ -64,6 +71,7 @@ def run_daily(*, scheduled_date: date, actual_run_time: datetime,
         "delivery_status": status,
         "dry_run": dry_run,
         "failure_stage": stage if failure else None,
+        "counts": counts,
     }
     try:
         store.append_run(record)

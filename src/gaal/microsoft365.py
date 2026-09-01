@@ -121,7 +121,7 @@ def normalize_message(message: dict[str, Any]) -> Item:
 
 
 class GraphMailSource:
-    """Read Inbox messages through Microsoft Graph without mutation permissions."""
+    """Read received mailbox messages through Graph without mutation permissions."""
 
     def __init__(self, credential: TokenProvider,
                  request: Callable[[str, dict[str, str]], dict[str, Any]] | None = None):
@@ -146,19 +146,27 @@ class GraphMailSource:
         query = urlencode({
             "$filter": f"receivedDateTime ge {_utc(start)} and receivedDateTime lt {_utc(end)}",
             "$orderby": "receivedDateTime asc",
-            "$select": "id,internetMessageId,conversationId,receivedDateTime,from,subject,bodyPreview",
+            "$select": "id,internetMessageId,conversationId,parentFolderId,receivedDateTime,from,subject,bodyPreview",
             "$top": "100",
         })
-        url = f"{GRAPH_ROOT}/me/mailFolders/inbox/messages?{query}"
         headers = {"Authorization": f"Bearer {self.credential.get_token()}",
                    "Accept": "application/json"}
+        excluded_folder_ids = set()
+        for folder in ("sentitems", "deleteditems"):
+            payload = self.request(f"{GRAPH_ROOT}/me/mailFolders/{folder}?$select=id", headers)
+            folder_id = payload.get("id")
+            if not isinstance(folder_id, str) or not folder_id:
+                raise GraphError(f"Microsoft Graph returned an invalid {folder} folder")
+            excluded_folder_ids.add(folder_id)
+        url = f"{GRAPH_ROOT}/me/messages?{query}"
         messages: list[dict[str, Any]] = []
         for _ in range(100):
             payload = self.request(url, headers)
             page = payload.get("value")
             if not isinstance(page, list):
                 raise GraphError("Microsoft Graph returned an invalid message page")
-            messages.extend(page)
+            messages.extend(message for message in page
+                            if message.get("parentFolderId") not in excluded_folder_ids)
             next_url = payload.get("@odata.nextLink")
             if not next_url:
                 break

@@ -17,7 +17,7 @@ def reference(item: Item) -> str:
 
 def daily(items: Iterable[Item]) -> Notification:
     ordered = sorted(items, key=lambda item: (SEVERITY[item.flag or "green"], item.id))
-    title = "# Seldon daily briefing"
+    title = "# Gaal daily briefing"
     if not ordered:
         body = f"{title}\n\nNo material activity.\n"
     else:
@@ -27,4 +27,4 @@ def daily(items: Iterable[Item]) -> Notification:
             for item in ordered
         ]
         body = "\n".join(lines) + "\n"
-    return Notification(subject="Seldon daily briefing", body=body)
+    return Notification(subject="Gaal daily briefing", body=body)

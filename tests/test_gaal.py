@@ -168,7 +168,8 @@ class GaalTests(unittest.TestCase):
         red = classify(item(id="a", service_impact=True), as_of=NOW)
         self.assertLess(daily([green, red]).body.index(reference(red)),
                         daily([green, red]).body.index(reference(green)))
-        self.assertEqual(daily([]).body, "# Seldon daily briefing\n\nNo material activity.\n")
+        self.assertEqual(daily([]).body, "# Gaal daily briefing\n\nNo material activity.\n")
+        self.assertEqual(daily([]).subject, "Gaal daily briefing")
         concise = classify(item(briefing_summary="Concise operational summary."), as_of=NOW)
         self.assertIn("Concise operational summary.", daily([concise]).body)
         self.assertNotIn("Needs attention", daily([concise]).body)
@@ -212,6 +213,10 @@ class GaalTests(unittest.TestCase):
                       destination=Destination(), store=store)
             self.assertIn("🔴 Customer", output[0])
             self.assertEqual(store.last_run()["delivery_status"], "dry_run")
+            self.assertEqual(store.last_run()["counts"], {
+                "fetched": 1, "interpreted": 1, "classified": 1,
+                "rendered": 1, "delivered": 1,
+            })
             with closing(sqlite3.connect(path / "gaal.db")) as connection:
                 self.assertEqual(connection.execute("SELECT count(*) FROM workflow_runs").fetchone()[0], 1)
                 self.assertEqual(connection.execute("SELECT count(*) FROM item_state").fetchone()[0], 1)
@@ -297,6 +302,10 @@ class GaalTests(unittest.TestCase):
                           schedule=SCHEDULE, source=BadSource(), destination=Destination(), store=store)
             record = store.last_run()
             self.assertEqual(record["failure_stage"], "source_reading")
+            self.assertEqual(record["counts"], {
+                "fetched": 0, "interpreted": 0, "classified": 0,
+                "rendered": 0, "delivered": 0,
+            })
             self.assertNotIn("mail content", json.dumps(record))
 
     def test_graph_message_normalization_is_bounded_and_neutral(self):
@@ -317,13 +326,25 @@ class GaalTests(unittest.TestCase):
                 return "secret-token"
         calls = []
         pages = [
+            {"id": "sent-folder"},
+            {"id": "deleted-folder"},
             {"value": [{"id": "one", "receivedDateTime": "2026-08-31T05:00:00Z",
+                         "parentFolderId": "archive-folder",
                          "from": {"emailAddress": {"address": "a@example.com"}},
                          "subject": "One", "bodyPreview": "First"}],
              "@odata.nextLink": "https://graph.microsoft.com/v1.0/next?page=2"},
             {"value": [{"id": "two", "receivedDateTime": "2026-08-31T06:00:00Z",
+                         "parentFolderId": "inbox-folder",
                          "from": {"emailAddress": {"address": "b@example.com"}},
-                         "subject": "Two", "bodyPreview": "Second"}]},
+                         "subject": "Two", "bodyPreview": "Second"},
+                       {"id": "sent", "receivedDateTime": "2026-08-31T06:15:00Z",
+                         "parentFolderId": "sent-folder",
+                         "from": {"emailAddress": {"address": "me@example.com"}},
+                         "subject": "Sent", "bodyPreview": "Outbound"},
+                       {"id": "deleted", "receivedDateTime": "2026-08-31T06:20:00Z",
+                         "parentFolderId": "deleted-folder",
+                         "from": {"emailAddress": {"address": "c@example.com"}},
+                         "subject": "Deleted", "bodyPreview": "Removed"}]},
         ]
         def request(url, headers):
             calls.append((url, headers))
@@ -331,16 +352,35 @@ class GaalTests(unittest.TestCase):
         source = GraphMailSource(Credential(), request=request)
         results = source.read(datetime.fromisoformat("2026-08-27T15:15:00+01:00"), NOW)
         self.assertEqual([value.id for value in results], ["one", "two"])
-        self.assertIn("receivedDateTime+ge+2026-08-27T14%3A15%3A00Z", calls[0][0])
-        self.assertEqual(calls[0][1]["Authorization"], "Bearer secret-token")
+        self.assertEqual(calls[0][0], "https://graph.microsoft.com/v1.0/me/mailFolders/sentitems?$select=id")
+        self.assertEqual(calls[1][0], "https://graph.microsoft.com/v1.0/me/mailFolders/deleteditems?$select=id")
+        self.assertIn("/me/messages?", calls[2][0])
+        self.assertNotIn("mailFolders/inbox", calls[2][0])
+        self.assertIn("receivedDateTime+ge+2026-08-27T14%3A15%3A00Z", calls[2][0])
+        self.assertIn("receivedDateTime+lt+2026-08-31T06%3A30%3A00Z", calls[2][0])
+        self.assertIn("parentFolderId", calls[2][0])
+        self.assertEqual(calls[2][1]["Authorization"], "Bearer secret-token")
 
     def test_graph_source_rejects_invalid_page(self):
         class Credential:
             def get_token(self, *, interactive=False):
                 return "token"
-        source = GraphMailSource(Credential(), request=lambda url, headers: {"value": "bad"})
+        responses = iter(({"id": "sent"}, {"id": "deleted"}, {"value": "bad"}))
+        source = GraphMailSource(Credential(), request=lambda url, headers: next(responses))
         with self.assertRaises(GraphError):
             source.read(datetime.fromisoformat("2026-08-27T15:15:00+01:00"), NOW)
+
+    def test_mailer_daemon_delivery_failure_is_never_green(self):
+        failure = item(source="MAILER-DAEMON@example.com",
+                       summary="Undeliverable: delivery has failed to these recipients")
+        result = classify(failure, as_of=NOW)
+        self.assertTrue(result.automated)
+        self.assertTrue(result.exception)
+        self.assertEqual((result.flag, result.reason), ("yellow", "automated_exception"))
+
+        missed_by_model = item(source="Microsoft Outlook", automated=True,
+                               summary="Delivery Status Notification (Failure)")
+        self.assertEqual(classify(missed_by_model, as_of=NOW).flag, "yellow")
 
     def test_microsoft365_cli_does_not_construct_fixture_source(self):
         with tempfile.TemporaryDirectory() as directory, \
