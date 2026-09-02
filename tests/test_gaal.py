@@ -227,30 +227,51 @@ class GaalTests(unittest.TestCase):
 
     def test_daily_sort_and_empty_contract(self):
         green = classify(item(id="z"), as_of=NOW)
-        red = classify(item(id="a", service_impact=True), as_of=NOW)
-        orange = classify(item(id="o", action_required=True), as_of=NOW)
-        self.assertLess(daily([orange, red]).body.index(reference(red)),
-                        daily([orange, red]).body.index(reference(orange)))
-        self.assertEqual(daily([]).body, "# Gaal daily briefing\n\nNo material activity.\n")
-        self.assertEqual(daily([]).subject, "Gaal daily briefing")
-        self.assertEqual(daily([green]).body, "# Gaal daily briefing\n\nNo material activity.\n")
+        red = classify(item(id="a", source="Red", service_impact=True), as_of=NOW)
+        orange = classify(item(id="o", source="Orange", action_required=True), as_of=NOW)
+        self.assertLess(daily([orange, red]).body.index("Red:"),
+                        daily([orange, red]).body.index("Orange:"))
+        self.assertIn("No material activity", daily([]).body)
+        self.assertEqual(daily([]).subject, "Morning Email Briefing")
+        self.assertIn("No material activity", daily([green]).body)
         concise = classify(item(briefing_summary="Concise operational summary.",
                                 action_required=True), as_of=NOW)
         self.assertIn("Concise operational summary.", daily([concise]).body)
         self.assertNotIn("Needs attention", daily([concise]).body)
         ticketed = classify(item(action_required=True, blocked=True, ticket_recommended=True,
                                  ticket_reason="Track this work."), as_of=NOW)
-        self.assertIn("🎫", daily([ticketed]).body)
+        self.assertNotIn("🎫", daily([ticketed]).body)
 
-    def test_briefing_uses_stable_opaque_references(self):
+    def test_briefing_does_not_expose_provider_references(self):
         value = classify(item(id="<private-provider-id@example.com>",
                               action_required=True), as_of=NOW)
         first = daily([value]).body
         second = daily([value]).body
         self.assertEqual(first, second)
-        self.assertIn("[olk:", first)
         self.assertNotIn("private-provider-id", first)
         self.assertEqual(len(reference(value)), 16)
+
+    def test_briefing_matches_seldon_shape_and_groups_backup_noise(self):
+        window = SCHEDULE.daily_window(date(2026, 8, 31))
+        values = [classify(item(
+            id=f"backup-{index}", thread_id=f"backup-{index}", source="root",
+            summary="Backup failed because the RDX cartridge could not be mounted",
+            service_impact=True), as_of=NOW) for index in range(12)]
+        values.extend(classify(item(id=f"action-{index}", thread_id=f"thread-{index}",
+                                    source=f"Customer {index}", action_required=True),
+                               as_of=NOW) for index in range(8))
+        body = daily(values, window=window, reviewed_count=275).body
+        self.assertIn("Morning Email Briefing", body)
+        self.assertIn("Window reviewed: Thu 27 Aug 15:15 to Mon 31 Aug 07:30 BST.", body)
+        self.assertIn("I reviewed 275 messages. I did not modify any email.", body)
+        self.assertIn("1. Executive Summary", body)
+        self.assertIn("2. Today's Priorities", body)
+        self.assertIn("Backup failures: 12 alerts, including RDX/cartridge issues need triage.", body)
+        self.assertEqual(sum(line[:2] in {"1.", "2.", "3.", "4.", "5."}
+                             for line in body.splitlines()[body.splitlines().index(
+                                 "2. Today's Priorities") + 1:]), 5)
+        self.assertNotIn("🔴", body)
+        self.assertNotIn("olk:", body)
 
     def test_schedule_uses_previous_finish_and_handles_weekend_and_dst(self):
         monday = SCHEDULE.daily_window(date(2026, 8, 31))
@@ -278,7 +299,7 @@ class GaalTests(unittest.TestCase):
             run_daily(scheduled_date=date(2026, 8, 31), actual_run_time=NOW,
                       schedule=SCHEDULE, source=JsonFileSource(source_path),
                       destination=Destination(), store=store)
-            self.assertIn("🔴 Customer", output[0])
+            self.assertIn("1. Customer: Production is down", output[0])
             self.assertEqual(store.last_run()["delivery_status"], "dry_run")
             self.assertEqual(store.last_run()["counts"], {
                 "fetched": 1, "interpreted": 1, "classified": 1,
@@ -308,8 +329,9 @@ class GaalTests(unittest.TestCase):
             run_daily(scheduled_date=date(2026, 9, 1),
                       actual_run_time=datetime.fromisoformat("2026-09-01T07:30:00+01:00"),
                       schedule=SCHEDULE, source=source, destination=Destination(), store=store)
-            self.assertIn("🔵", outputs[-1])
+            self.assertIn("Customer: Needs attention", outputs[-1])
             self.assertEqual(store.item_history(source.value)["seen_count"], 2)
+            self.assertEqual(store.item_history(source.value)["last_flag"], "blue")
 
     def test_delivered_window_cannot_be_dispatched_twice(self):
         with tempfile.TemporaryDirectory() as directory:

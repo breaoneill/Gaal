@@ -53,7 +53,7 @@ def run_daily(*, scheduled_date: date, actual_run_time: datetime,
         counts["classified"] = len(classified)
         store.record_items(classified, observed_at=actual_run_time.isoformat())
         stage = "rendering"
-        notification = daily(classified)
+        notification = daily(classified, window=window, reviewed_count=counts["fetched"])
         counts["rendered"] = len(classified)
         stage = "destination_dispatch"
         destination.deliver(notification, dry_run=dry_run)
