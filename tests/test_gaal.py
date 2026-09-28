@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import sqlite3
 import tempfile
@@ -8,18 +9,20 @@ from contextlib import closing
 from unittest.mock import patch
 from datetime import date, datetime, time
 from pathlib import Path
+from urllib.error import HTTPError
 
 from gaal.adapters import JsonFileSource
 from gaal.briefings import daily, reference
 from gaal.classification import classify
-from gaal.cli import main
+from gaal.cli import _failure_notification, main
 from gaal.models import Item
 from gaal.microsoft365 import GraphError, GraphMailSource, normalize_message
 from gaal.schedule import WorkSchedule
 from gaal.store import SQLiteStore
 from gaal.workflow import WorkflowFailure, run_daily
 from gaal.reasoning import (DisabledReasoningProvider, OllamaReasoningProvider,
-                            OpenAIReasoningProvider, ReasoningError, make_reasoning_provider)
+                            OpenAIReasoningProvider, ProviderAPIError, ReasoningError,
+                            make_reasoning_provider, _post_json)
 from gaal.config import ReasoningSettings, load_telegram
 from gaal.telegram import TelegramBotDestination, TelegramError
 
@@ -137,6 +140,29 @@ class GaalTests(unittest.TestCase):
         self.assertIsInstance(provider, OpenAIReasoningProvider)
         self.assertNotIn("secret", repr(provider))
         run.assert_called_once()
+
+    def test_openai_http_error_preserves_safe_api_details(self):
+        api_key = "sk-private-test-key"
+        body = json.dumps({"error": {
+            "type": "insufficient_quota",
+            "code": "credit_balance_exhausted",
+            "message": f"You have no credits remaining. Credential {api_key}",
+        }}).encode()
+        error = HTTPError("https://api.openai.com/v1/responses", 429,
+                          "Too Many Requests", {}, io.BytesIO(body))
+        with patch("gaal.reasoning.urlopen", side_effect=error), \
+                self.assertRaises(ProviderAPIError) as raised:
+            _post_json("https://api.openai.com/v1/responses", {},
+                       {"Authorization": f"Bearer {api_key}"})
+        detail = raised.exception
+        self.assertEqual((detail.provider, detail.status), ("OpenAI", 429))
+        self.assertEqual(detail.error_type, "insufficient_quota")
+        self.assertEqual(detail.code, "credit_balance_exhausted")
+        self.assertIn("You have no credits remaining", str(detail))
+        self.assertNotIn(api_key, str(detail))
+        failure = WorkflowFailure("reasoning")
+        failure.__cause__ = detail
+        self.assertNotIn(api_key, _failure_notification(failure).body)
 
     def test_reasoning_rejects_missing_items(self):
         provider = OllamaReasoningProvider(model="test", request=lambda *args: {
@@ -380,6 +406,14 @@ class GaalTests(unittest.TestCase):
             self.assertIsNone(settings.chat_id)
             self.assertEqual(settings.chat_id_keychain_service, "chat")
 
+    def test_telegram_config_can_read_chat_id_from_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "gaal.toml"
+            path.write_text('''[telegram]\ntoken_env = "TELEGRAM_BOT_TOKEN"\n''')
+            settings = load_telegram(path)
+            self.assertIsNone(settings.chat_id)
+            self.assertEqual(settings.chat_id_env, "TELEGRAM_CHAT_ID")
+
     def test_failure_is_audited(self):
         with tempfile.TemporaryDirectory() as directory:
             class BadSource:
@@ -505,6 +539,135 @@ class GaalTests(unittest.TestCase):
             self.assertEqual(status, 2)
             captured = "".join(call.args[0] for call in stderr.write.call_args_list)
             self.assertIn("omitted an item", captured)
+
+    def test_daily_cli_success_sends_only_normal_briefing(self):
+        delivered = []
+        class Destination:
+            def deliver(self, notification, *, dry_run):
+                delivered.append(notification.body)
+        destination = Destination()
+        def successful_run(**kwargs):
+            kwargs["destination"].deliver(
+                __import__("gaal.models", fromlist=["Notification"]).Notification(
+                    subject="Morning Email Briefing", body="normal briefing\n"),
+                dry_run=False)
+        with patch("gaal.cli.run_daily", side_effect=successful_run), \
+             patch("gaal.cli.load_schedule"), patch("gaal.cli.load_reasoning"), \
+             patch("gaal.cli.make_reasoning_provider"), patch("gaal.cli.JsonFileSource"), \
+             patch("gaal.cli.load_telegram") as telegram, \
+             patch("gaal.cli.resolve_secret", return_value="secret"), \
+             patch("gaal.cli.TelegramBotDestination", return_value=destination):
+            telegram.return_value.chat_id = "chat"
+            telegram.return_value.token_env = "TELEGRAM_BOT_TOKEN"
+            telegram.return_value.keychain_service = None
+            telegram.return_value.keychain_account = None
+            status = main(["daily", "--config", "unused", "--input", "unused",
+                           "--date", "2026-08-31", "--run-at", NOW.isoformat(),
+                           "--state", ":memory:", "--deliver-telegram"])
+        self.assertEqual(status, 0)
+        self.assertEqual(delivered, ["normal briefing\n"])
+
+    def test_daily_cli_reports_reasoning_failure_and_remains_failed(self):
+        delivered = []
+        class Destination:
+            def deliver(self, notification, *, dry_run):
+                delivered.append(notification.body)
+        failure = WorkflowFailure("reasoning")
+        failure.__cause__ = ProviderAPIError(
+            provider="OpenAI", status=429, error_type="insufficient_quota",
+            code="credit_balance_exhausted", message="You have no credits remaining.")
+        with patch("gaal.cli.run_daily", side_effect=failure), \
+             patch("gaal.cli.load_schedule"), patch("gaal.cli.load_reasoning"), \
+             patch("gaal.cli.make_reasoning_provider"), patch("gaal.cli.JsonFileSource"), \
+             patch("gaal.cli.load_telegram") as telegram, \
+             patch("gaal.cli.resolve_secret", return_value="secret"), \
+             patch("gaal.cli.TelegramBotDestination", return_value=Destination()):
+            telegram.return_value.chat_id = "chat"
+            telegram.return_value.token_env = "TELEGRAM_BOT_TOKEN"
+            telegram.return_value.keychain_service = None
+            telegram.return_value.keychain_account = None
+            status = main(["daily", "--config", "unused", "--input", "unused",
+                           "--date", "2026-08-31", "--run-at", NOW.isoformat(),
+                           "--state", ":memory:", "--deliver-telegram"])
+        self.assertEqual(status, 2)
+        self.assertEqual(len(delivered), 1)
+        self.assertIn("Stage: reasoning", delivered[0])
+        self.assertIn("Provider: OpenAI", delivered[0])
+        self.assertIn("HTTP: 429", delivered[0])
+        self.assertIn("Type: insufficient_quota", delivered[0])
+        self.assertIn("Code: credit_balance_exhausted", delivered[0])
+
+    def test_notification_failure_does_not_obscure_workflow_failure(self):
+        class Destination:
+            def deliver(self, notification, *, dry_run):
+                raise TelegramError("Telegram is unavailable")
+        failure = WorkflowFailure("reasoning")
+        failure.__cause__ = ReasoningError("original reasoning failure")
+        with patch("gaal.cli.run_daily", side_effect=failure), \
+             patch("gaal.cli.load_schedule"), patch("gaal.cli.load_reasoning"), \
+             patch("gaal.cli.make_reasoning_provider"), patch("gaal.cli.JsonFileSource"), \
+             patch("gaal.cli.load_telegram") as telegram, \
+             patch("gaal.cli.resolve_secret", return_value="secret"), \
+             patch("gaal.cli.TelegramBotDestination", return_value=Destination()), \
+             patch("sys.stderr") as stderr:
+            telegram.return_value.chat_id = "chat"
+            telegram.return_value.token_env = "TELEGRAM_BOT_TOKEN"
+            telegram.return_value.keychain_service = None
+            telegram.return_value.keychain_account = None
+            status = main(["daily", "--config", "unused", "--input", "unused",
+                           "--date", "2026-08-31", "--run-at", NOW.isoformat(),
+                           "--state", ":memory:", "--deliver-telegram"])
+        captured = "".join(call.args[0] for call in stderr.write.call_args_list)
+        self.assertEqual(status, 2)
+        self.assertIn("original reasoning failure", captured)
+        self.assertIn("Telegram failure notification failed", captured)
+
+    def test_failure_notification_diagnostic_is_isolated_and_clearly_marked(self):
+        delivered = []
+        class Destination:
+            def deliver(self, notification, *, dry_run):
+                delivered.append((notification, dry_run))
+        with patch("gaal.cli.load_telegram") as telegram, \
+             patch("gaal.cli.resolve_secret", return_value="secret"), \
+             patch("gaal.cli.TelegramBotDestination", return_value=Destination()), \
+             patch("gaal.cli.run_daily") as run_daily_mock, \
+             patch("gaal.cli.make_reasoning_provider") as reasoning_mock, \
+             patch("gaal.cli.SQLiteStore") as store_mock, \
+             patch("sys.stdout") as stdout:
+            telegram.return_value.chat_id = "chat"
+            telegram.return_value.token_env = "TELEGRAM_BOT_TOKEN"
+            telegram.return_value.keychain_service = None
+            telegram.return_value.keychain_account = None
+            status = main(["test-failure-notification", "--config", "unused"])
+        self.assertEqual(status, 0)
+        self.assertEqual(len(delivered), 1)
+        self.assertFalse(delivered[0][1])
+        self.assertIn("TEST", delivered[0][0].subject)
+        self.assertIn("TEST", delivered[0][0].body)
+        self.assertIn("Stage: diagnostic", delivered[0][0].body)
+        self.assertIn("no briefing workflow or reasoning provider was run", delivered[0][0].body)
+        run_daily_mock.assert_not_called()
+        reasoning_mock.assert_not_called()
+        store_mock.assert_not_called()
+        self.assertIn("TEST failure notification sent", stdout.write.call_args_list[0].args[0])
+
+    def test_failure_notification_diagnostic_reports_telegram_failure(self):
+        class Destination:
+            def deliver(self, notification, *, dry_run):
+                raise TelegramError("Telegram is unavailable")
+        with patch("gaal.cli.load_telegram") as telegram, \
+             patch("gaal.cli.resolve_secret", return_value="secret"), \
+             patch("gaal.cli.TelegramBotDestination", return_value=Destination()), \
+             patch("sys.stderr") as stderr:
+            telegram.return_value.chat_id = "chat"
+            telegram.return_value.token_env = "TELEGRAM_BOT_TOKEN"
+            telegram.return_value.keychain_service = None
+            telegram.return_value.keychain_account = None
+            status = main(["test-failure-notification", "--config", "unused"])
+        captured = "".join(call.args[0] for call in stderr.write.call_args_list)
+        self.assertEqual(status, 2)
+        self.assertIn("TEST failure notification failed", captured)
+        self.assertIn("Telegram is unavailable", captured)
 
 
 if __name__ == "__main__":

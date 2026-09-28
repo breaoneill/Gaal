@@ -17,6 +17,25 @@ class ReasoningError(RuntimeError):
     pass
 
 
+class ProviderAPIError(ReasoningError):
+    def __init__(self, *, provider: str, status: int,
+                 error_type: str | None = None, code: str | None = None,
+                 message: str | None = None):
+        self.provider = provider
+        self.status = status
+        self.error_type = error_type
+        self.code = code
+        self.message = message
+        detail = [f"{provider} API failure", f"HTTP {status}"]
+        if error_type:
+            detail.append(f"type: {error_type}")
+        if code:
+            detail.append(f"code: {code}")
+        if message:
+            detail.append(f"message: {message}")
+        super().__init__("; ".join(detail))
+
+
 INTERPRETATION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {"items": {"type": "array", "items": {
@@ -129,7 +148,26 @@ def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str]) -> di
         with urlopen(request, timeout=120) as response:
             value = json.load(response)
     except HTTPError as exc:
-        raise ReasoningError(f"reasoning provider returned HTTP {exc.code}") from exc
+        provider = "OpenAI" if urlparse(url).hostname == "api.openai.com" else "Ollama"
+        error_type = code = message = None
+        try:
+            body = json.loads(exc.read(65536))
+            error = body.get("error", {}) if isinstance(body, dict) else {}
+            if isinstance(error, dict):
+                error_type = error.get("type") if isinstance(error.get("type"), str) else None
+                code = error.get("code") if isinstance(error.get("code"), str) else None
+                message = error.get("message") if isinstance(error.get("message"), str) else None
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            pass
+        secrets = [value.removeprefix("Bearer ") for name, value in headers.items()
+                   if name.lower() == "authorization"]
+        for secret in filter(None, secrets):
+            if message:
+                message = message.replace(secret, "[redacted]")
+        if message:
+            message = " ".join(message.split())[:1000]
+        raise ProviderAPIError(provider=provider, status=exc.code,
+                               error_type=error_type, code=code, message=message) from exc
     except URLError as exc:
         raise ReasoningError("reasoning provider is unavailable") from exc
     if not isinstance(value, dict):

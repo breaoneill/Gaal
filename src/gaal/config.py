@@ -115,6 +115,6 @@ def load_telegram(path: str | Path) -> TelegramSettings:
         raise ValueError(f"invalid Telegram configuration: {exc}") from exc
     if settings.chat_id is not None and not settings.chat_id:
         raise ValueError("Telegram chat_id must be non-empty")
-    if settings.chat_id is None and not settings.chat_id_keychain_service:
-        raise ValueError("Telegram chat ID or Keychain service is required")
+    if not settings.chat_id_env:
+        raise ValueError("Telegram chat_id_env must be non-empty")
     return settings
