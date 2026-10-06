@@ -134,7 +134,7 @@ class GaalTests(unittest.TestCase):
                                      api_key_env="MISSING_GAAL_TEST_KEY",
                                      keychain_service="gaal-test", keychain_account="tester")
         completed = __import__("subprocess").CompletedProcess([], 0, "secret\n", "")
-        with patch.dict("os.environ", {}, clear=True), patch(
+        with patch("gaal.secrets.sys.platform", "darwin"), patch.dict("os.environ", {}, clear=True), patch(
                 "gaal.secrets.subprocess.run", return_value=completed) as run:
             provider = make_reasoning_provider(settings)
         self.assertIsInstance(provider, OpenAIReasoningProvider)

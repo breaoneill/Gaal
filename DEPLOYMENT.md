@@ -275,9 +275,25 @@ Confirm that Telegram received one complete briefing and that the audit record
 says delivery succeeded. A missing briefing is not proof of an empty mailbox;
 it may be a failed schedule, source, reasoning or delivery stage.
 
-Independent failure notification is not yet implemented. Until it is, the
-operator must check the timer and service after deployment and investigate a
-missing morning briefing.
+Workflow failures are recorded and trigger a Telegram diagnostic notification.
+After investigating a failed run, use the supported manual recovery command:
+
+```sh
+sudo systemctl start gaal-daily.service
+```
+
+Directly invoking `run-daily` bypasses the unit's
+`EnvironmentFile=/etc/gaal/gaal.env` and can therefore leave required secrets
+unset. `systemctl start` waits for this oneshot service to finish. Follow progress
+from another terminal with `journalctl -fu gaal-daily.service`.
+
+OpenAI requests retry transient HTTP 429, 500, 502, 503 and 504 responses and
+transient connection/timeouts, with three total attempts and delays of one and
+two seconds. Billing quota exhaustion, authentication, client and structured
+output errors fail immediately. Exhausted retries retain the normal workflow
+failure and diagnostic notification. A timed-out request may already have been
+processed by the provider, so retries can incur additional provider usage.
+Progress logs contain counts and fixed status text, never mailbox content.
 
 ## Releasing a verified commit
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from datetime import date, datetime
 
@@ -82,6 +83,8 @@ def _deliver_failure_notification(destination: TelegramBotDestination,
 
 
 def main(argv: list[str] | None = None) -> int:
+    logging.basicConfig(level=logging.WARNING, format="%(message)s")
+    logging.getLogger("gaal").setLevel(logging.INFO)
     args = parser().parse_args(argv)
     destination = None
     try:

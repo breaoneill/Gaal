@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from datetime import date, datetime
 from dataclasses import replace
 
@@ -9,6 +11,9 @@ from .models import Notification
 from .ports import Destination, ReasoningProvider, Source
 from .schedule import WorkSchedule
 from .store import SQLiteStore
+
+
+logger = logging.getLogger(__name__)
 
 
 class WorkflowFailure(RuntimeError):
@@ -38,6 +43,7 @@ def run_daily(*, scheduled_date: date, actual_run_time: datetime,
             raise DuplicateDelivery("briefing was already delivered for this scheduled window")
         items = source.read(window.start, window.end)
         counts["fetched"] = len(items)
+        logger.info("Gaal daily: fetched %d messages", len(items))
         if reasoning is not None:
             stage = "reasoning"
             items = reasoning.interpret(items)
@@ -51,6 +57,7 @@ def run_daily(*, scheduled_date: date, actual_run_time: datetime,
         stage = "classification"
         classified = [classify(item, as_of=actual_run_time) for item in items]
         counts["classified"] = len(classified)
+        logger.info("Gaal daily: classified %d", len(classified))
         store.record_items(classified, observed_at=actual_run_time.isoformat())
         stage = "rendering"
         notification = daily(classified, window=window, reviewed_count=counts["fetched"])
@@ -59,6 +66,8 @@ def run_daily(*, scheduled_date: date, actual_run_time: datetime,
         destination.deliver(notification, dry_run=dry_run)
         counts["delivered"] = len(classified)
         status = "dry_run" if dry_run else "delivered"
+        logger.info("Gaal daily: dry run completed" if dry_run
+                    else "Gaal daily: delivered successfully")
     except Exception as exc:
         failure = exc
     record = {

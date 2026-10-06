@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import errno
+import logging
+import socket
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from typing import Any
@@ -34,6 +38,34 @@ class ProviderAPIError(ReasoningError):
         if message:
             detail.append(f"message: {message}")
         super().__init__("; ".join(detail))
+
+
+logger = logging.getLogger(__name__)
+
+
+def _transient_failure(exc: Exception) -> bool:
+    if isinstance(exc, ProviderAPIError):
+        # Exhausted billing quota cannot recover through a short retry.
+        if {exc.error_type, exc.code} & {"insufficient_quota", "credit_balance_exhausted"}:
+            return False
+        return exc.status in {429, 500, 502, 503, 504}
+    if isinstance(exc, ReasoningError):
+        exc = exc.__cause__
+    if isinstance(exc, URLError):
+        exc = exc.reason
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return True
+    if isinstance(exc, socket.gaierror):
+        return exc.errno == socket.EAI_AGAIN
+    return isinstance(exc, OSError) and exc.errno in {
+        errno.ETIMEDOUT, errno.ECONNRESET, errno.ECONNABORTED,
+        errno.ECONNREFUSED, errno.EPIPE, errno.ENETUNREACH, errno.EHOSTUNREACH,
+    }
+
+
+def _progress(completed: int, total: int, previous: int) -> None:
+    if completed == total or completed // 50 > previous // 50:
+        logger.info("Gaal daily: reasoning %d/%d", completed, total)
 
 
 INTERPRETATION_SCHEMA: dict[str, Any] = {
@@ -209,6 +241,7 @@ class OllamaReasoningProvider:
                     and len(payload["items"]) == 1 and isinstance(payload["items"][0], dict):
                 payload["items"][0]["id"] = batch[0].id
             interpreted.extend(_apply(batch, payload))
+            _progress(len(interpreted), len(items), offset)
         return interpreted
 
 
@@ -222,6 +255,19 @@ class OpenAIReasoningProvider:
             raise ValueError("OpenAI batch size and cost limit must be positive")
         self.model, self.api_key, self.request = model, api_key, request
         self.batch_size, self.max_cost_usd = batch_size, max_cost_usd
+
+    def _request(self, url: str, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
+        for attempt in range(1, 4):
+            try:
+                return self.request(url, payload, headers)
+            except Exception as exc:
+                if attempt == 3 or not _transient_failure(exc):
+                    raise
+                delay = 2 ** (attempt - 1)
+                logger.info("Gaal daily: transient reasoning failure; retry %d/3 in %ds",
+                            attempt + 1, delay)
+                time.sleep(delay)
+        raise AssertionError("unreachable")
 
     def interpret(self, items: Sequence[Item]) -> list[Item]:
         if not items:
@@ -237,7 +283,7 @@ class OpenAIReasoningProvider:
             originals = items[offset:offset + self.batch_size]
             aliases = [replace(item, id=f"item-{index}")
                        for index, item in enumerate(originals)]
-            response = self.request("https://api.openai.com/v1/responses", {
+            response = self._request("https://api.openai.com/v1/responses", {
                 "model": self.model, "store": False,
                 "reasoning": {"effort": "none"},
                 "max_output_tokens": max_output_tokens,
@@ -264,6 +310,7 @@ class OpenAIReasoningProvider:
             values = _apply(aliases, payload)
             interpreted.extend(replace(value, id=original.id)
                                for value, original in zip(values, originals))
+            _progress(len(interpreted), len(items), offset)
         return interpreted
 
 
