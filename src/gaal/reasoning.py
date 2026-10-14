@@ -21,6 +21,12 @@ class ReasoningError(RuntimeError):
     pass
 
 
+class InvalidEvidenceError(ReasoningError):
+    def __init__(self, item_id: str):
+        self.item_id = item_id
+        super().__init__("reasoning result contains invalid evidence")
+
+
 class ProviderAPIError(ReasoningError):
     def __init__(self, *, provider: str, status: int,
                  error_type: str | None = None, code: str | None = None,
@@ -138,7 +144,7 @@ def _apply(items: Sequence[Item], payload: Any) -> list[Item]:
         evidence = value["evidence"]
         if not isinstance(evidence, list) or len(evidence) > 3 or any(
                 not isinstance(entry, str) or not entry.strip() for entry in evidence):
-            raise ReasoningError("reasoning result contains invalid evidence")
+            raise InvalidEvidenceError(item_id)
         briefing_summary = value["briefing_summary"]
         if not isinstance(briefing_summary, str) or not briefing_summary.strip() \
                 or len(briefing_summary) > 240:
@@ -277,17 +283,16 @@ class OpenAIReasoningProvider:
         max_output_tokens = 5000
         reserve_per_batch = 20_000 * 0.75 / 1_000_000 \
             + max_output_tokens * 4.50 / 1_000_000
-        for offset in range(0, len(items), self.batch_size):
+
+        def request_result(aliases: Sequence[Item], correction: str = "") -> Any:
+            nonlocal spent
             if spent + reserve_per_batch > self.max_cost_usd:
                 raise ReasoningError("OpenAI reasoning stopped at the configured cost limit")
-            originals = items[offset:offset + self.batch_size]
-            aliases = [replace(item, id=f"item-{index}")
-                       for index, item in enumerate(originals)]
             response = self._request("https://api.openai.com/v1/responses", {
                 "model": self.model, "store": False,
                 "reasoning": {"effort": "none"},
                 "max_output_tokens": max_output_tokens,
-                "instructions": SYSTEM, "input": _input(aliases),
+                "instructions": SYSTEM + correction, "input": _input(aliases),
                 "text": {"format": {"type": "json_schema", "name": "gaal_interpretation",
                                     "strict": True, "schema": INTERPRETATION_SCHEMA}},
             }, {"Authorization": f"Bearer {self.api_key}"})
@@ -307,7 +312,38 @@ class OpenAIReasoningProvider:
                 raise
             except (KeyError, TypeError, json.JSONDecodeError) as exc:
                 raise ReasoningError("OpenAI returned an invalid structured response or usage") from exc
-            values = _apply(aliases, payload)
+            return payload
+
+        for offset in range(0, len(items), self.batch_size):
+            originals = items[offset:offset + self.batch_size]
+            aliases = [replace(item, id=f"item-{index}")
+                       for index, item in enumerate(originals)]
+            payload = request_result(aliases)
+            corrected: set[str] = set()
+            while True:
+                try:
+                    values = _apply(aliases, payload)
+                    break
+                except InvalidEvidenceError as exc:
+                    if exc.item_id in corrected:
+                        raise
+                    corrected.add(exc.item_id)
+                    affected = next(value for value in aliases if value.id == exc.item_id)
+                    logger.info("Gaal daily: invalid evidence; corrective retry for one message")
+                    correction = (
+                        f"\nThe previous result failed validation: {exc}. "
+                        "Return a corrected result for the single supplied message, using the "
+                        "required JSON schema and exactly its supplied id. Evidence must be an "
+                        "array of at most three non-empty strings containing short exact fragments "
+                        "from the supplied summary. Do not invent evidence."
+                    )
+                    retry_payload = request_result([affected], correction)
+                    _apply([affected], retry_payload)
+                    # Keep every other result and revalidate the complete batch.
+                    payload = {**payload, "items": [
+                        retry_payload["items"][0] if value["id"] == exc.item_id else value
+                        for value in payload["items"]
+                    ]}
             interpreted.extend(replace(value, id=original.id)
                                for value, original in zip(values, originals))
             _progress(len(interpreted), len(items), offset)

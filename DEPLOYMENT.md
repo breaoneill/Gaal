@@ -289,8 +289,11 @@ from another terminal with `journalctl -fu gaal-daily.service`.
 
 OpenAI requests retry transient HTTP 429, 500, 502, 503 and 504 responses and
 transient connection/timeouts, with three total attempts and delays of one and
-two seconds. Billing quota exhaustion, authentication, client and structured
-output errors fail immediately. Exhausted retries retain the normal workflow
+two seconds. Invalid evidence receives at most one corrective request for the
+affected message, with the validation error and unchanged schema requirements.
+The corrected result is validated again; a second failure aborts normally.
+Corrective requests use the same HTTP retries and cost limit. Billing quota
+exhaustion, authentication, client and other structured output errors fail immediately. Exhausted retries retain the normal workflow
 failure and diagnostic notification. A timed-out request may already have been
 processed by the provider, so retries can incur additional provider usage.
 Progress logs contain counts and fixed status text, never mailbox content.

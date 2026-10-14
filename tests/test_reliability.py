@@ -79,6 +79,96 @@ class ReliabilityTests(unittest.TestCase):
                 request.assert_called_once()
                 sleep.assert_not_called()
 
+    def evidence_response(self, payload, evidence):
+        result = response("", payload, {})
+        values = json.loads(result["output"][0]["content"][0]["text"])
+        values["items"][-1]["evidence"] = evidence
+        result["output"][0]["content"][0]["text"] = json.dumps(values)
+        return result
+
+    def test_invalid_evidence_retries_only_affected_message(self):
+        for evidence in (None, "fragment", [""], ["   "], [1], ["x"] * 4):
+            with self.subTest(evidence=evidence):
+                calls = []
+                def request(url, payload, headers):
+                    calls.append(payload)
+                    if len(calls) == 1:
+                        return self.evidence_response(payload, evidence)
+                    return response(url, payload, headers)
+                values = self.provider(request).interpret([item(id="first"), item(id="second")])
+                self.assertEqual([value.id for value in values], ["first", "second"])
+                self.assertEqual([value.evidence for value in values], [("Needs attention",)] * 2)
+                self.assertEqual(len(calls), 2)
+                self.assertEqual([value["id"] for value in json.loads(calls[1]["input"])], ["item-1"])
+                self.assertIn("reasoning result contains invalid evidence", calls[1]["instructions"])
+                self.assertIn("at most three non-empty strings", calls[1]["instructions"])
+                self.assertEqual(calls[0]["text"], calls[1]["text"])
+                self.assertFalse(calls[1]["store"])
+
+    def test_each_invalid_message_gets_one_correction(self):
+        calls = []
+        def request(url, payload, headers):
+            calls.append(payload)
+            if len(calls) == 1:
+                result = self.evidence_response(payload, None)
+                values = json.loads(result["output"][0]["content"][0]["text"])
+                values["items"][0]["evidence"] = [""]
+                result["output"][0]["content"][0]["text"] = json.dumps(values)
+                return result
+            return response(url, payload, headers)
+        values = self.provider(request).interpret([item(id="first"), item(id="second")])
+        self.assertEqual([value.id for value in values], ["first", "second"])
+        self.assertEqual([[value["id"] for value in json.loads(call["input"])]
+                          for call in calls], [["item-0", "item-1"], ["item-0"], ["item-1"]])
+
+    def test_corrected_result_still_requires_complete_schema(self):
+        bad = self.evidence_response({"input": '[{"id":"item-0"}]'}, None)
+        incomplete = response("", {"input": '[]'}, {})
+        request = Mock(side_effect=[bad, incomplete])
+        with self.assertRaisesRegex(ReasoningError, "omitted an item"):
+            self.provider(request).interpret([item()])
+        self.assertEqual(request.call_count, 2)
+
+    def test_invalid_evidence_twice_preserves_failure_audit(self):
+        from gaal.cli import _failure_notification
+        request = Mock(side_effect=lambda url, payload, headers:
+                       self.evidence_response(payload, [""]))
+        destination = Mock()
+        destination.name = "test"
+        store = SQLiteStore(self.state)
+        with self.assertRaises(WorkflowFailure) as raised:
+            run_daily(scheduled_date=NOW.date(), actual_run_time=NOW, schedule=SCHEDULE,
+                      source=Mock(read=Mock(return_value=[item()])), destination=destination,
+                      store=store, dry_run=False, reasoning=self.provider(request))
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(raised.exception.stage, "reasoning")
+        self.assertIn("invalid evidence", _failure_notification(raised.exception).body)
+        self.assertEqual(store.last_run()["failure_stage"], "reasoning")
+        destination.deliver.assert_not_called()
+
+    def test_corrective_request_keeps_transient_retries(self):
+        bad = self.evidence_response({"input": '[{"id":"item-0"}]'}, None)
+        good = response("", {"input": '[{"id":"item-0"}]'}, {})
+        request = Mock(side_effect=[bad, ProviderAPIError(provider="OpenAI", status=503), good])
+        with patch("gaal.reasoning.time.sleep") as sleep:
+            self.assertEqual(len(self.provider(request).interpret([item()])), 1)
+        self.assertEqual(request.call_count, 3)
+        sleep.assert_called_once_with(1)
+
+    def test_corrective_request_obeys_cost_limit(self):
+        request = Mock(side_effect=lambda url, payload, headers:
+                       self.evidence_response(payload, None))
+        provider = OpenAIReasoningProvider(model="test", api_key="secret", request=request,
+                                          max_cost_usd=0.038)
+        with self.assertRaisesRegex(ReasoningError, "cost limit"):
+            provider.interpret([item()])
+        request.assert_called_once()
+
+    def test_valid_evidence_needs_no_correction(self):
+        request = Mock(side_effect=response)
+        self.assertEqual(len(self.provider(request).interpret([item()])), 1)
+        request.assert_called_once()
+
     def test_transport_wrapped_network_error_retries(self):
         with patch("gaal.reasoning.urlopen", side_effect=URLError(TimeoutError())) as request, \
              patch("gaal.reasoning.time.sleep"):
